@@ -6,3 +6,6 @@ python-jose[cryptography]
 passlib[bcrypt]
 python-dotenv
 requests
+pydantic[email]
+python-multipart
+openai
