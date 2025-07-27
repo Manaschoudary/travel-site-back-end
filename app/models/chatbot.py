@@ -3,6 +3,15 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from bson import ObjectId
 
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: str(ObjectId()))
+    email: str
+    name: Optional[str]
+    picture: Optional[str]
+    auth_provider: str  # 'google', 'facebook', or 'apple'
+    provider_user_id: str  # ID from the auth provider
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
 class ChatRequest(BaseModel):
     message: str
     user_id: Optional[str] = None  # To track which user made the request

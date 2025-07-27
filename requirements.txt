@@ -9,3 +9,6 @@ requests
 pydantic[email]
 python-multipart
 openai
+authlib
+itsdangerous
+httpx

@@ -27,23 +27,30 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Travel assistant prompt template
 TRAVEL_ASSISTANT_PROMPT = """
-You are a travel planning assistant. Please provide a travel plan in the following format:
+You are a travel planning assistant. Create a detailed travel itinerary following this exact format:
 
-SUMMARY:
-Provide a brief 2-3 sentence overview of the trip.
+Travel Itinerary
 
-ITINERARY:
-For each day, list:
-- City
-- Activities (bullet points)
-- Accommodation suggestion (if changing locations)
+Trip Summary:
+[2-3 sentences describing the overall trip]
 
-Format the response exactly as shown above, making it easy to parse programmatically.
-Keep activities concise and practical.
+Daily Itinerary:
+Day 1 - [City/Location]
+• [Activity 1]
+• [Activity 2]
+• [Activity 3]
+[Accommodation details if changing location]
+
+Day 2 - [City/Location]
+[Continue format for each day]
+
+Important formatting rules:
+1. Start each day with "Day X - [Location]"
+2. List activities with bullet points (•)
+3. Include accommodation only when changing locations
+4. Keep descriptions concise and practical
 
 User's message: {user_message}
-
-Remember to maintain the exact format: SUMMARY section followed by ITINERARY section.
 """
 
 def extract_cities(itinerary: List[ItineraryDay]) -> List[str]:
@@ -53,19 +60,30 @@ def extract_cities(itinerary: List[ItineraryDay]) -> List[str]:
 
 def generate_booking_links(itinerary: List[ItineraryDay]) -> Dict[str, str]:
     """Generate booking.com and skyscanner links based on the itinerary"""
+    if not itinerary:
+        return {"booking": "", "skyscanner": ""}
+        
     cities = extract_cities(itinerary)
+    if not cities:
+        return {"booking": "", "skyscanner": ""}
+        
     total_days = len(itinerary)
+    main_city = cities[0].split()[0]  # Take first word of city name for better compatibility
     
-    # Generate Booking.com link for the first city (main destination)
-    booking_params = {
-        "city": cities[0].replace(" ", "+"),
-        "checkin": "flexible",
-        "nights": str(total_days)
-    }
-    booking_url = f"https://www.booking.com/searchresults.html?ss={booking_params['city']}&checkin={booking_params['checkin']}&group_adults=2&no_rooms=1&group_children=0"
+    # Generate Booking.com link
+    booking_url = (
+        f"https://www.booking.com/searchresults.html"
+        f"?ss={main_city.replace(' ', '+')}"
+        f"&checkin=flexible"
+        f"&group_adults=2"
+        f"&no_rooms=1"
+        f"&group_children=0"
+        f"&nflt=ht_id%3D204"  # Filter for hotels
+    )
     
-    # Generate Skyscanner link for the first city
-    skyscanner_url = f"https://www.skyscanner.com/transport/flights/{cities[0][:3].upper()}"
+    # Generate Skyscanner link
+    city_code = main_city[:3].upper()
+    skyscanner_url = f"https://www.skyscanner.com/transport/flights/{city_code}"
     
     return {
         "booking": booking_url,
@@ -83,51 +101,53 @@ async def save_chat_history(request: ChatRequest, response: ChatResponse) -> Non
 
 def parse_ai_response(response_text: str) -> Tuple[str, List[ItineraryDay]]:
     """Parse the AI response into summary and itinerary sections"""
-    # Split into summary and itinerary sections
-    sections = response_text.split("ITINERARY:")
-    if len(sections) != 2:
-        raise ValueError("Invalid response format")
+    # Extract summary
+    summary_match = re.search(r'Trip Summary:(.+?)(?=Day \d|$)', response_text, re.DOTALL)
+    if not summary_match:
+        raise ValueError("Could not find Trip Summary section")
+    summary_section = summary_match.group(1).strip()
     
-    summary_section = sections[0].replace("SUMMARY:", "").strip()
-    itinerary_section = sections[1].strip()
-    
-    # Parse itinerary days
-    current_city = ""
-    current_activities = []
-    current_accommodation = None
+    # Extract and parse daily itinerary
     itinerary_days = []
+    day_sections = re.findall(r'Day (\d+)[^\n]*?(?:\n|$)(?:(?!Day \d).)*', response_text, re.DOTALL)
     
-    for line in itinerary_section.split("\n"):
-        line = line.strip()
-        if not line:
+    current_section = None
+    for section in re.split(r'(Day \d+[^\n]*)', response_text):
+        section = section.strip()
+        if not section:
             continue
             
-        # If line starts with "Day" or has a city name
-        if line.startswith("Day") or ":" in line:
-            # Save previous day if we have one
-            if current_city:
+        if section.startswith('Day'):
+            if current_section:
+                # Parse previous section
+                city = current_section['heading'].split(' - ')[-1].strip()
+                activities = [a.strip('• ').strip() for a in current_section['content']]
+                accommodation = next((a for a in activities if 'stay' in a.lower() or 'resort' in a.lower() or 'hotel' in a.lower() or 'accommodation' in a.lower()), None)
+                if accommodation:
+                    activities.remove(accommodation)
+                
                 itinerary_days.append(ItineraryDay(
-                    city=current_city,
-                    activities=current_activities,
-                    accommodation=current_accommodation
+                    city=city,
+                    activities=activities,
+                    accommodation=accommodation
                 ))
-            # Reset for new day
-            current_city = line.split(":")[-1].strip() if ":" in line else ""
-            current_activities = []
-            current_accommodation = None
-        elif line.startswith("-"):
-            activity = line[1:].strip()
-            if "accommodation" in activity.lower():
-                current_accommodation = activity
-            else:
-                current_activities.append(activity)
+                
+            current_section = {'heading': section, 'content': []}
+        elif current_section is not None:
+            current_section['content'].extend([l.strip() for l in section.split('\n') if l.strip() and not l.strip().startswith('Day')])
     
-    # Add the last day
-    if current_city:
+    # Don't forget to add the last section
+    if current_section:
+        city = current_section['heading'].split(' - ')[-1].strip()
+        activities = [a.strip('• ').strip() for a in current_section['content']]
+        accommodation = next((a for a in activities if 'stay' in a.lower() or 'resort' in a.lower() or 'hotel' in a.lower() or 'accommodation' in a.lower()), None)
+        if accommodation:
+            activities.remove(accommodation)
+        
         itinerary_days.append(ItineraryDay(
-            city=current_city,
-            activities=current_activities,
-            accommodation=current_accommodation
+            city=city,
+            activities=activities,
+            accommodation=accommodation
         ))
     
     return summary_section, itinerary_days
